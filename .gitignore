@@ -1,0 +1,16 @@
+.forgeagent/
+.koreagent-next/
+backend/forgeagent-migration-*/
+backend/.venv/
+backend/.env
+backend/workspace/
+*Zone.Identifier
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+desktop/node_modules/
+desktop/dist/
+desktop/dist-electron/
+native/macos-computer-helper/.build/
+*.log
