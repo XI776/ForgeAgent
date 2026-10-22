@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import logging
 import re
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .application import Application, RpcFault
@@ -19,7 +22,42 @@ from .config import Settings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("forgeagent_next.server")
 HEX_ID = re.compile(r"^[0-9a-f]{32}$")
-LOOPBACK = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+def trusted_client(host: str, entries: tuple[str, ...]) -> bool:
+    if not host:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host in entries
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    for entry in entries:
+        try:
+            network = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            if entry == host:
+                return True
+            continue
+        if network.version == address.version and address in network:
+            return True
+    return False
+
+
+def origin_allowed(origin: str | None, host_header: str, entries: tuple[str, ...], allowed_origins: tuple[str, ...]) -> bool:
+    # Missing origins come from non-browser clients; "null" comes from file://
+    # pages such as the packaged Electron app.
+    if not origin or origin == "null":
+        return True
+    if origin in allowed_origins:
+        return True
+    parsed = urlsplit(origin)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if parsed.netloc == host_header:
+        return True
+    return bool(parsed.hostname and trusted_client(parsed.hostname, entries))
 
 
 class Hub:
@@ -75,14 +113,20 @@ def create_app(application: Application | None = None) -> FastAPI:
             "version": __version__,
         }
 
-    def require_local(request: Request) -> None:
-        host = request.client.host if request.client else ""
-        if host not in LOOPBACK:
+    trusted_entries = tuple(
+        entry.strip() for entry in application.settings.trusted_clients.split(",") if entry.strip()
+    )
+    allowed_origins = tuple(
+        entry.strip() for entry in application.settings.allowed_origins.split(",") if entry.strip()
+    )
+
+    def require_trusted(request: Request) -> None:
+        if not trusted_client(request.client.host if request.client else "", trusted_entries):
             raise HTTPException(403, "forbidden")
 
     @app.get("/artifacts/{artifact_id}/content")
     async def artifact_content(artifact_id: str, request: Request) -> Response:
-        require_local(request)
+        require_trusted(request)
         if not HEX_ID.fullmatch(artifact_id):
             raise HTTPException(404, "not found")
         path = await application.artifact_path(artifact_id)
@@ -96,21 +140,6 @@ def create_app(application: Application | None = None) -> FastAPI:
             filename=artifact.get("filename") or "artifact",
             headers={"Cache-Control": "no-store"},
         )
-
-    @app.get("/computer/screenshots/{observation_id}.png")
-    async def computer_screenshot(observation_id: str, request: Request) -> Response:
-        require_local(request)
-        if not HEX_ID.fullmatch(observation_id):
-            raise HTTPException(404, "not found")
-        root = (application.settings.data_dir / "screenshots").resolve()
-        path = (root / f"{observation_id}.png").resolve()
-        try:
-            path.relative_to(root)
-        except ValueError:
-            raise HTTPException(404, "not found") from None
-        if not path.is_file():
-            raise HTTPException(404, "not found")
-        return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
 
     async def handle(ws: WebSocket, payload: Any) -> None:
         request_id: str | int | None = payload.get("id") if isinstance(payload, dict) else None
@@ -176,6 +205,15 @@ def create_app(application: Application | None = None) -> FastAPI:
 
     @app.websocket("/rpc")
     async def rpc(ws: WebSocket) -> None:
+        if not trusted_client(ws.client.host if ws.client else "", trusted_entries):
+            await ws.close(code=1008)
+            return
+        if not origin_allowed(
+            ws.headers.get("origin"), ws.headers.get("host", ""), trusted_entries, allowed_origins
+        ):
+            logger.warning("Rejected WebSocket origin %s", ws.headers.get("origin"))
+            await ws.close(code=1008)
+            return
         await ws.accept()
         await hub.add(ws)
         tasks: set[asyncio.Task[Any]] = set()
@@ -202,6 +240,11 @@ def create_app(application: Application | None = None) -> FastAPI:
             await hub.remove(ws)
             for task in tasks:
                 task.cancel()
+
+    if application.settings.web_dir and (application.settings.web_dir / "index.html").is_file():
+        app.mount("/", StaticFiles(directory=str(application.settings.web_dir), html=True), name="web")
+    else:
+        logger.info("Web UI directory is unavailable; serving the RPC API only")
 
     return app
 

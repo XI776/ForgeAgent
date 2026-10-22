@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { queueDesktopApproval, reduceAgentEvent, resolveApproval } from './liveState'
-import type { Approval } from './types'
-
-const approval=(id:string,tool_name='computer_click'):Approval=>({id,run_id:'run',tool_name,arguments:{},reason:'test',status:'pending',created_at:'now'})
+import { reduceAgentEvent } from './liveState'
 
 describe('live run state',()=>{
   it('assembles streamed text, reasoning and tool activity',()=>{
@@ -17,18 +14,5 @@ describe('live run state',()=>{
     const first=reduceAgentEvent(null,{run_id:'one',type:'assistant_delta',delta:'old'})
     const second=reduceAgentEvent(first,{run_id:'two',type:'assistant_delta',delta:'new'})
     expect(second).toMatchObject({runId:'two',content:'new'})
-  })
-})
-
-describe('desktop approval queue',()=>{
-  it('keeps only unique desktop-scoped approvals',()=>{
-    const computer=approval('a')
-    const sandbox=approval('b','shell')
-    expect(queueDesktopApproval([],sandbox)).toEqual([])
-    expect(queueDesktopApproval(queueDesktopApproval([],computer),computer)).toEqual([computer])
-  })
-
-  it('removes resolved approvals',()=>{
-    expect(resolveApproval([approval('a'),approval('b')],'a').map(item=>item.id)).toEqual(['b'])
   })
 })

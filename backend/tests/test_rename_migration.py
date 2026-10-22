@@ -52,10 +52,16 @@ def test_custom_data_directory_keeps_existing_database(tmp_path: Path):
     assert (directory / "koreagent-next.db").is_file()
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows DPAPI only")
-def test_legacy_dpapi_secret_can_be_read(monkeypatch):
-    current_service = secret_module.SERVICE
-    monkeypatch.setattr(secret_module, "SERVICE", secret_module.LEGACY_SERVICE)
-    encrypted = secret_module.SecretStore._dpapi_protect("existing-token")
-    monkeypatch.setattr(secret_module, "SERVICE", current_service)
-    assert secret_module.SecretStore._dpapi_unprotect(encrypted) == "existing-token"
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux file-backed secrets")
+def test_linux_secrets_and_signing_key_use_private_files(tmp_path: Path, monkeypatch):
+    for name in ("FORGEAGENT_QWEN_API_KEY", "KORENEXT_QWEN_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    store = secret_module.SecretStore(tmp_path)
+    store.set("qwen", "secret-token")
+    assert store.get("qwen") == "secret-token"
+    assert store.source("qwen") == "file"
+    assert (tmp_path / "secrets.json").stat().st_mode & 0o777 == 0o600
+    first = store.permission_signing_key()
+    second = secret_module.SecretStore(tmp_path).permission_signing_key()
+    assert first == second and len(first) >= 32
+    assert (tmp_path / secret_module.SIGNING_KEY_FILE).stat().st_mode & 0o777 == 0o600

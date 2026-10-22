@@ -6,7 +6,6 @@ import json
 import mimetypes
 import re
 import shutil
-import sys
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -17,8 +16,6 @@ import httpx
 
 from .agent import ModelClient, ToolExecutor
 from .checkpoint import CheckpointStore
-from .computer import ComputerClient
-from .computer_guard import ComputerStagnationGuard
 from .config import Settings
 from .context import ContextDecision, ContextManager
 from .database import Database
@@ -28,6 +25,7 @@ from .memory import MemoryService
 from .permissions import PermissionRuleStore
 from .run_insights import summarize_run_usage
 from .runtime_policy import RepeatedToolCallGuard, RunBudget, RunBudgetConfig, RuntimePolicyError
+from .sandbox import sandbox_capabilities
 from .secrets import SecretStore
 from .skill_learning import SkillLearningService
 from .tasks import TaskService
@@ -55,8 +53,11 @@ class Application:
         self.settings.ensure_dirs()
         self.db = Database(self.settings.database)
         self.secrets = SecretStore(self.settings.data_dir / "settings")
-        self.mcp_manager = McpManager(self.settings.workspace_dir)
-        self.computer = ComputerClient(self.settings, self._store_observation)
+        self.mcp_manager = McpManager(
+            self.settings.workspace_dir,
+            home=self.settings.sandbox_home,
+            backend=self.settings.sandbox_backend,
+        )
         self.context_manager = ContextManager(self.db)
         self.checkpoints = CheckpointStore(self.db)
         self.memory_service = MemoryService(self.db)
@@ -64,7 +65,6 @@ class Application:
         self.evidence = EvidenceStore(self.db)
         self.skill_learning = SkillLearningService(self.db)
         self.permission_rules = PermissionRuleStore(self.db, signing_key=self.secrets.permission_signing_key())
-        self.computer_guard = ComputerStagnationGuard()
         self.run_budget = RunBudget(
             RunBudgetConfig(
                 warning_tokens=self.settings.run_warning_tokens,
@@ -91,7 +91,6 @@ class Application:
         await self.skill_learning.scan_completed_runs(existing_skills=await self._skills(), limit=100)
         mcp = await self._mcp()
         await self.mcp_manager.start(mcp["servers"])
-        await self.computer.start()
         await self._restore_automation_runs()
         self.automation_task = asyncio.create_task(self._automation_loop())
 
@@ -111,7 +110,6 @@ class Application:
                 pass
         await asyncio.gather(*self.running.values(), *self.background_tasks, return_exceptions=True)
         await self.mcp_manager.close()
-        await self.computer.close()
 
     def methods(self) -> dict[str, Callable[[dict[str, Any]], Awaitable[Any]]]:
         return {
@@ -150,9 +148,6 @@ class Application:
             "task.get": self.task_get,
             "task.plan_accept": self.task_plan_accept,
             "task.plan_reject": self.task_plan_reject,
-            "computer.status": self.computer_status,
-            "computer.request_permission": self.computer_request_permission,
-            "computer.latest_observation": self.computer_latest_observation,
             "extension.list": self.extension_list,
             "extension.import.preview": self.extension_import_preview,
             "extension.import.apply": self.extension_import_apply,
@@ -179,12 +174,23 @@ class Application:
             "platform": __import__("sys").platform,
             "rpc_methods": sorted(self.methods()),
             "legacy_permission_rules_needing_review": legacy_rules["n"] if legacy_rules else 0,
-            "execution_capabilities": {
-                "workspace_sandbox": "macos-seatbelt" if sys.platform == "darwin" else "unavailable",
-                "shell_workspace": sys.platform == "darwin",
-                "mcp_workspace": sys.platform == "darwin",
-                "host_process": True,
-            },
+            "execution_capabilities": self._sandbox_info(),
+        }
+
+    def _sandbox_info(self) -> dict[str, Any]:
+        capabilities = sandbox_capabilities(
+            self.settings.workspace_dir,
+            home=self.settings.sandbox_home,
+            backend=self.settings.sandbox_backend,
+        )
+        return {
+            "workspace_sandbox": capabilities.backend,
+            "shell_workspace": capabilities.workspace,
+            "mcp_workspace": capabilities.workspace,
+            "workspace_readonly": capabilities.readonly,
+            "network_denied": capabilities.network_denied,
+            "host_process": True,
+            "reason": capabilities.reason,
         }
 
     async def system_restart(self, params: dict[str, Any]) -> dict[str, bool]:
@@ -192,12 +198,13 @@ class Application:
         if active:
             raise RpcFault(-32001, "Host restart is blocked by active runs", {"run_ids": active})
         await self.mcp_manager.close()
-        await self.computer.close()
-        self.mcp_manager = McpManager(self.settings.workspace_dir)
+        self.mcp_manager = McpManager(
+            self.settings.workspace_dir,
+            home=self.settings.sandbox_home,
+            backend=self.settings.sandbox_backend,
+        )
         mcp = await self._mcp()
         await self.mcp_manager.start(mcp["servers"])
-        self.computer = ComputerClient(self.settings, self._store_observation)
-        await self.computer.start()
         return {"accepted": True}
 
     async def _model_view(self) -> dict[str, Any]:
@@ -617,7 +624,6 @@ class Application:
                 self.publish_artifact,
                 self.remember,
                 self.mcp_manager,
-                self.computer,
                 self,
             )
             if recovery_state:
@@ -904,15 +910,6 @@ class Application:
                         output, success, error = exc.payload, False, str(exc)
                     except Exception as exc:
                         output, success, error = "", False, str(exc)
-                    # Repeated computer failures and unchanged observations stop
-                    # the run before another ineffective action is attempted.
-                    self.computer_guard.record(
-                        run_id=run["id"],
-                        tool_name=call["name"],
-                        success=success,
-                        output=output,
-                        error=error,
-                    )
                     duration_ms = round((asyncio.get_running_loop().time() - started) * 1000)
                     if success and call["name"] == "task_create":
                         try:
@@ -1037,10 +1034,6 @@ class Application:
                 error={"type": type(exc).__name__, "message": str(exc)},
             )
             raise RpcFault(-32603, "Agent run failed", {"run_id": run["id"], "message": str(exc)}) from exc
-        finally:
-            self.computer_guard.clear(run["id"])
-            await self.computer.end_run(run["id"])
-
     def _history_for_model(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result = []
         for message in history:
@@ -1320,7 +1313,7 @@ class Application:
 
     async def _request_approval(self, run_id: str, call_id: str, arguments: dict[str, Any], reason: str) -> bool:
         stamp, aid = now(), uid()
-        tool_name = str(arguments.get("tool_name") or ("computer" if reason.startswith("执行电脑操作") else "tool"))
+        tool_name = str(arguments.get("tool_name") or "tool")
         try:
             conversation_id = (await self.run_get({"run_id": run_id}))["run"].get("conversation_id")
         except RpcFault:
@@ -1343,7 +1336,6 @@ class Application:
             "tool_call_id": call_id,
             "arguments": arguments,
             "reason": reason,
-            "ui_scope": "desktop" if tool_name.startswith("computer") else "sandbox",
             "status": "pending",
             "created_at": stamp,
             "resolved_at": None,
@@ -1414,7 +1406,7 @@ class Application:
         if scope not in {"once", "run", "conversation", "global"}:
             raise RpcFault(-32602, "scope must be once, run, conversation, or global")
         if scope != "once" and self.permission_rules.signing_key is None:
-            raise RpcFault(-32001, "Persistent approval rules require an OS-protected signing key")
+            raise RpcFault(-32001, "Persistent approval rules require a protected signing key")
         rule = None
         if scope != "once":
             # Persistent decisions are bound to the exact tool arguments and the
@@ -1856,23 +1848,6 @@ class Application:
             task = asyncio.create_task(self._execute_run(run))
             self.running[run["id"]] = task
             task.add_done_callback(lambda _task, run_id=run["id"]: self.running.pop(run_id, None))
-
-    async def computer_status(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self.computer.status()
-
-    async def computer_request_permission(self, params: dict[str, Any]) -> dict[str, Any]:
-        if params.get("permission") not in {"accessibility", "screen_recording"}:
-            raise RpcFault(-32602, "Invalid permission")
-        try:
-            return await self.computer.permission(str(params["permission"]))
-        except RuntimeError as exc:
-            raise RpcFault(-32001, str(exc)) from exc
-
-    async def computer_latest_observation(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self.db.get_json("computer_latest_observation", {"run_id": None, "event_time": None, "observation": None})
-
-    async def _store_observation(self, observation: dict[str, Any]) -> None:
-        await self.db.set_json("computer_latest_observation", observation)
 
     async def tool_call(self, name: str, arguments: dict[str, Any], *, run_id: str, mode: str) -> Any:
         run = (await self.run_get({"run_id": run_id}))["run"]
@@ -2348,18 +2323,34 @@ class Application:
             state = "failed" if error else "running"
             tool_names = [tool.get("name", "") for tool in runtime.tools]
         sandbox = item.get("sandbox") or {}
-        filesystem = sandbox.get("filesystem", "workspace")
-        network = sandbox.get("network", "denied")
+        filesystem = str(sandbox.get("filesystem", "workspace"))
+        network = str(sandbox.get("network", "denied"))
         host_mode = filesystem == "host" and network == "allowed"
-        native_sandbox = sys.platform == "darwin" and not host_mode
-        supported = host_mode or (
-            native_sandbox and network in {"allowed", "denied"}
-            and filesystem in {"workspace", "readonly"}
+        capabilities = sandbox_capabilities(
+            self.settings.workspace_dir,
+            home=self.settings.sandbox_home,
+            backend=self.settings.sandbox_backend,
         )
-        supported = supported and not any(sandbox.get(key) for key in ("readable_roots", "writable_roots", "allowed_domains"))
+        if filesystem == "host":
+            policy_supported = network == "allowed" or capabilities.network_denied
+        elif filesystem == "workspace":
+            policy_supported = capabilities.workspace and (network == "allowed" or capabilities.network_denied)
+        elif filesystem == "readonly":
+            policy_supported = capabilities.readonly and (network == "allowed" or capabilities.network_denied)
+        else:
+            policy_supported = False
+        supported = policy_supported and not any(
+            sandbox.get(key) for key in ("readable_roots", "writable_roots", "allowed_domains")
+        )
         if item.get("enabled", True) and not supported and not runtime:
             state = "unavailable"
-            error = "所选沙箱策略在此平台不可用，进程不会启动"
+            if network == "denied" and capabilities.workspace and not capabilities.network_denied:
+                error = "当前环境无法隔离网络；请将该 MCP 的网络策略设为 allowed，或检查 bubblewrap 的 namespace 权限"
+            elif filesystem == "readonly" and capabilities.workspace and not capabilities.readonly:
+                error = "当前环境无法提供只读文件系统隔离；请改用 workspace 策略"
+            else:
+                error = capabilities.reason or "所选沙箱策略在此平台不可用，进程不会启动"
+        sandboxed = not host_mode and capabilities.backend != "unavailable"
         return {
             **item,
             "env_names": sorted(item.get("env", {}).keys()),
@@ -2369,8 +2360,8 @@ class Application:
             "started_at": runtime.started_at if runtime else None,
             "last_call_at": runtime.last_call_at if runtime else None,
             "restart_count": runtime.restart_count if runtime else 0,
-            "sandboxed": native_sandbox,
-            "sandbox_backend": "macos-seatbelt" if native_sandbox and supported else ("host" if host_mode and supported else "unavailable"),
+            "sandboxed": sandboxed,
+            "sandbox_backend": "host" if host_mode else (capabilities.backend if supported else "unavailable"),
         }
 
     async def mcp_add(self, params: dict[str, Any]) -> dict[str, Any]:

@@ -18,7 +18,6 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from .computer import ComputerClient
 from .config import Settings
 from .mcp import McpManager, McpToolError
 from .sandbox import SandboxSupervisor
@@ -952,7 +951,6 @@ class ToolExecutor:
         publish: Callable[..., Awaitable[Any]],
         remember: Callable[..., Awaitable[Any]],
         mcp: McpManager,
-        computer: ComputerClient,
         services: Any | None = None,
     ):
         self.settings = settings
@@ -960,9 +958,12 @@ class ToolExecutor:
         self.publish = publish
         self.remember = remember
         self.mcp = mcp
-        self.computer = computer
         self.services = services
-        self.sandbox = SandboxSupervisor(settings.workspace_dir)
+        self.sandbox = SandboxSupervisor(
+            settings.workspace_dir,
+            home=settings.sandbox_home,
+            backend=settings.sandbox_backend,
+        )
         self.activated_tools: set[str] = set()
 
     def tool_definitions(self, mode: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -970,14 +971,14 @@ class ToolExecutor:
         base = [definition for definition in available if definition["function"]["name"] in CORE_TOOLS | self.activated_tools]
         extra = []
         if mode != "plan":
-            extra = [definition for definition in self.mcp.tool_definitions() + self.computer.tool_definitions()
+            extra = [definition for definition in self.mcp.tool_definitions()
                      if definition["function"]["name"] in self.activated_tools]
         return base, extra
 
     def activate_tools(self, query: str, mode: str) -> dict[str, Any]:
         options = builtin_tool_definitions(mode)
         if mode != "plan":
-            options = [*options, *self.mcp.tool_definitions(), *self.computer.tool_definitions()]
+            options = [*options, *self.mcp.tool_definitions()]
         terms = [term.lower() for term in re.split(r"\s+", query.strip()) if term]
         matches = []
         for definition in options:
@@ -1002,19 +1003,13 @@ class ToolExecutor:
         *,
         mode: str = "normal",
     ) -> str:
-        if mode == "plan" and name not in PLAN_ALLOWED_TOOLS and not name.startswith("computer_observe"):
+        if mode == "plan" and name not in PLAN_ALLOWED_TOOLS:
             raise PermissionError(f"Tool {name} is not available in plan mode")
         if name == "tool_catalog":
             return json.dumps(self.activate_tools(str(arguments.get("query") or ""), mode), ensure_ascii=False)
         visible = {definition["function"]["name"] for group in self.tool_definitions(mode) for definition in group}
         if name not in visible:
             raise PermissionError(f"Tool {name} is not active; call tool_catalog first")
-        if name.startswith("computer_"):
-            if name != "computer_observe":
-                allowed = await self.approve(run_id, call_id, {**arguments, "tool_name": name}, f"执行电脑操作 {name}")
-                if not allowed:
-                    return "Denied by user"
-            return await self.computer.tool(run_id, name, arguments)
         if name.startswith("mcp__"):
             permission = self.mcp.permission(name)
             if permission == "forbidden":

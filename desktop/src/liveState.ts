@@ -1,5 +1,3 @@
-import type { Approval } from './types'
-
 export type LiveTool={id:string;name:string;status:'running'|'completed'|'failed';summary?:string}
 export type LiveRunState={runId:string;content:string;reasoning:string;tools:string[];toolActivity:LiveTool[];status:string;budgetStatus?:string}
 
@@ -25,15 +23,4 @@ export function reduceAgentEvent(previous:LiveRunState|null,event:any):LiveRunSt
   if(event.type==='agent_failed')return{...current,status:'failed'}
   if(event.type==='agent_completed')return{...current,status:'completed'}
   return current
-}
-
-export function queueDesktopApproval(queue:Approval[],approval:Approval):Approval[]{
-  // Computer approvals are also surfaced in the dedicated desktop window.
-  const isDesktop=approval.ui_scope==='desktop'||approval.tool_name.startsWith('computer_')
-  if(!isDesktop||queue.some(item=>item.id===approval.id))return queue
-  return[...queue,approval]
-}
-
-export function resolveApproval(queue:Approval[],approvalId:string):Approval[]{
-  return queue.filter(item=>item.id!==approvalId)
 }

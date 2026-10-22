@@ -187,7 +187,7 @@ class SkillLearningService:
         instructions = payload["instructions"].strip()
         if len(instructions) < 80 or len(instructions) > 12_000:
             return None
-        forbidden = re.compile(r"(?:api[_ -]?key|bearer\s+[a-z0-9]|[A-Z]:\\|/Users/)", re.I)
+        forbidden = re.compile(r"(?:api[_ -]?key|bearer\s+[a-z0-9]|[A-Z]:\\|/home/|/root/)", re.I)
         if forbidden.search(instructions):
             return None
         return {

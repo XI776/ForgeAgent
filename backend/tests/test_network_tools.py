@@ -96,14 +96,9 @@ async def test_http_redirect_rechecks_target_before_request(tmp_path: Path, monk
 
 
 def test_tool_catalog_exposes_optional_tools_only_after_activation(tmp_path: Path):
-    class NoComputer:
-        @staticmethod
-        def tool_definitions():
-            return []
-
     tool = ToolExecutor(
         Settings(data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace"),
-        None, None, None, McpManager(tmp_path), NoComputer(),  # type: ignore[arg-type]
+        None, None, None, McpManager(tmp_path), None,  # type: ignore[arg-type]
     )
     normal = {item["function"]["name"] for group in tool.tool_definitions("normal") for item in group}
     plan = {item["function"]["name"] for group in tool.tool_definitions("plan") for item in group}

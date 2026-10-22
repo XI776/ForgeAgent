@@ -1,7 +1,37 @@
-const defaultRpcUrl = 'ws://127.0.0.1:8765/rpc'
+const fallbackRpcUrl = 'ws://127.0.0.1:8765/rpc'
+
+export type RpcUrlOptions = {
+  configured?: string
+  dev?: boolean
+  protocol?: string
+  host?: string
+  pathname?: string
+}
+
+export function resolveRpcUrl(options: RpcUrlOptions = {}): string {
+  if (options.configured) return options.configured
+  // Vite dev serves the UI from :5173 while the Host listens on :8765.
+  if (options.dev) return fallbackRpcUrl
+  const protocol = options.protocol || ''
+  // A production build served by the Host itself uses the same origin, which
+  // keeps WebSocket and artifact URLs working behind Docker port mapping.
+  if ((protocol === 'http:' || protocol === 'https:') && options.host) {
+    const pathname = options.pathname || '/'
+    const basePath = pathname.endsWith('/') ? pathname : pathname.slice(0, pathname.lastIndexOf('/') + 1) || '/'
+    return `${protocol === 'https:' ? 'wss:' : 'ws:'}//${options.host}${basePath}rpc`
+  }
+  // Packaged Electron loads index.html from file:// and needs the loopback Host.
+  return fallbackRpcUrl
+}
 
 export function rpcUrl(): string {
-  return import.meta.env.VITE_RPC_URL || defaultRpcUrl
+  return resolveRpcUrl({
+    configured: import.meta.env.VITE_RPC_URL,
+    dev: import.meta.env.DEV,
+    protocol: typeof window === 'undefined' ? '' : window.location.protocol,
+    host: typeof window === 'undefined' ? '' : window.location.host,
+    pathname: typeof window === 'undefined' ? '/' : window.location.pathname,
+  })
 }
 
 export function httpBaseUrl(value = rpcUrl()): string {
@@ -15,8 +45,4 @@ export function httpBaseUrl(value = rpcUrl()): string {
 
 export function artifactContentUrl(id: string): string {
   return `${httpBaseUrl()}/artifacts/${encodeURIComponent(id)}/content`
-}
-
-export function computerScreenshotUrl(id: string): string {
-  return `${httpBaseUrl()}/computer/screenshots/${encodeURIComponent(id)}.png`
 }

@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from forge_agent.checkpoint import CheckpointStore
-from forge_agent.computer_guard import ComputerStagnationGuard
 from forge_agent.context import ContextManager, TokenEstimator
 from forge_agent.database import Database
 from forge_agent.evidence import EvidenceStore
@@ -14,7 +13,7 @@ from forge_agent.mcp import McpProcess
 from forge_agent.memory import MemoryService
 from forge_agent.permissions import PermissionRuleStore
 from forge_agent.runtime_policy import RepeatedToolCallGuard, RunBudget, RunBudgetConfig, RuntimePolicyError
-from forge_agent.sandbox import SandboxError, SandboxSupervisor
+from forge_agent.sandbox import SandboxError, SandboxSupervisor, sandbox_capabilities
 from forge_agent.skill_learning import SkillLearningService
 from forge_agent.tasks import TaskService
 from forge_agent.util import dumps, now
@@ -205,7 +204,7 @@ def test_sandbox_confines_paths_and_environment(tmp_path: Path, monkeypatch: pyt
     assert "FORGEAGENT_API_KEY" not in supervisor.clean_environment()
 
 
-async def test_windows_workspace_processes_fail_before_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_unsupported_platform_workspace_processes_fail_before_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import forge_agent.mcp as mcp_module
     import forge_agent.sandbox as sandbox_module
 
@@ -215,13 +214,49 @@ async def test_windows_workspace_processes_fail_before_spawn(tmp_path: Path, mon
     monkeypatch.setattr(sandbox_module.asyncio, "create_subprocess_exec", unexpected_spawn)
     monkeypatch.setattr(mcp_module.asyncio, "create_subprocess_exec", unexpected_spawn)
     supervisor = SandboxSupervisor(tmp_path)
-    with pytest.raises(SandboxError, match="unavailable"):
+    with pytest.raises(SandboxError, match="Linux"):
         await supervisor.run("cmd", ["/c", "echo unsafe"], filesystem="workspace")
     server = McpProcess({"command": "cmd", "name": "test", "sandbox": {"filesystem": "workspace", "network": "denied"}}, supervisor)
-    with pytest.raises(SandboxError, match="unavailable"):
+    with pytest.raises(SandboxError, match="Linux"):
         await server.start()
     launch = supervisor.prepare_launch("cmd", ["/c", "echo allowed"], filesystem="host", network="allowed")
     assert launch.backend == "host"
+
+
+def test_container_backend_only_supports_workspace_and_allowed_network(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import forge_agent.sandbox as sandbox_module
+
+    monkeypatch.setattr(sandbox_module.sys, "platform", "linux")
+    supervisor = SandboxSupervisor(tmp_path, home=tmp_path / "home", backend="container")
+    launch = supervisor.prepare_launch("sh", ["-c", "true"], filesystem="workspace", network="allowed")
+    assert launch.backend == "container"
+    assert launch.command == ["sh", "-c", "true"]
+    assert launch.env["HOME"] == str(tmp_path / "home")
+    with pytest.raises(SandboxError, match="Container sandbox"):
+        supervisor.prepare_launch("sh", [], filesystem="workspace", network="denied")
+    with pytest.raises(SandboxError, match="Container sandbox"):
+        supervisor.prepare_launch("sh", [], filesystem="readonly", network="allowed")
+    capabilities = sandbox_capabilities(tmp_path, home=tmp_path / "home", backend="container")
+    assert capabilities.backend == "container"
+    assert capabilities.workspace and not capabilities.readonly and not capabilities.network_denied
+
+
+def test_bubblewrap_arguments_use_minimal_root_and_deny_network(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import forge_agent.sandbox as sandbox_module
+
+    monkeypatch.setattr(sandbox_module.sys, "platform", "linux")
+    monkeypatch.setattr(SandboxSupervisor, "_bwrap_executable", lambda self: "/usr/bin/bwrap")
+    monkeypatch.setattr(SandboxSupervisor, "_bubblewrap_available", lambda self, *, network_denied: True)
+    supervisor = SandboxSupervisor(tmp_path, home=tmp_path / "home", backend="bubblewrap")
+    launch = supervisor.prepare_launch("python3", ["-c", "print(1)"], filesystem="workspace", network="denied")
+    assert launch.backend == "linux-bubblewrap"
+    command = launch.command
+    assert command[0] == "/usr/bin/bwrap"
+    assert "--unshare-net" in command
+    assert "--ro-bind" in command and "/etc" in command
+    assert "--bind" in command and str(tmp_path) in command
+    assert command.index("--dir") < command.index("--chdir")
+    assert launch.env["HOME"] == str(tmp_path / "home")
 
 
 def test_run_budget_warns_finalizes_and_stops():
@@ -353,24 +388,6 @@ async def test_database_upgrade_keeps_old_data_and_creates_backup(tmp_path: Path
     assert await db.get_json("old-setting") == {"kept": True}
     assert len(list(path.parent.glob("forgeagent.backup-v0-*.db"))) == 1
     assert await db.fetchone("SELECT name FROM sqlite_master WHERE name='automation_occurrences'") is not None
-
-
-def test_computer_guard_stops_repeated_failures_and_stale_observations():
-    failures = ComputerStagnationGuard(failure_limit=2)
-    failures.record(run_id="r1", tool_name="computer_click", success=False, output="", error="not_found: button")
-    with pytest.raises(RuntimePolicyError, match="repeated not_found"):
-        failures.record(run_id="r1", tool_name="computer_click", success=False, output="", error="not_found: field")
-
-    stagnant = ComputerStagnationGuard(stagnation_limit=2)
-    observation = dumps({"active_app": "Editor", "windows": ["Document"], "elements": [{"id": "save"}]})
-    stagnant.record(run_id="r2", tool_name="computer_observe", success=True, output=observation, error=None)
-    for _ in range(2):
-        stagnant.record(run_id="r2", tool_name="computer_click", success=True, output="{}", error=None)
-        if _ == 0:
-            stagnant.record(run_id="r2", tool_name="computer_observe", success=True, output=observation, error=None)
-        else:
-            with pytest.raises(RuntimePolicyError, match="fresh observations did not change"):
-                stagnant.record(run_id="r2", tool_name="computer_observe", success=True, output=observation, error=None)
 
 
 async def test_task_listing_can_be_scoped_to_a_conversation(database: Database):

@@ -25,7 +25,6 @@ class McpProcess:
     error: str | None = None
     sequence: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    profile_path: Path | None = None
     started_at: str | None = None
     restart_count: int = 0
     last_call_at: str | None = None
@@ -50,7 +49,6 @@ class McpProcess:
             writable_roots=sandbox.get("writable_roots"),
             allowed_domains=sandbox.get("allowed_domains"),
         )
-        self.profile_path = launch.profile_path
         try:
             self.process = await asyncio.create_subprocess_exec(
                 *launch.command, cwd=launch.cwd, env=launch.env,
@@ -89,9 +87,6 @@ class McpProcess:
                 await asyncio.wait_for(self.process.wait(), 3)
             except TimeoutError:
                 self.process.kill()
-        if self.profile_path:
-            self.profile_path.unlink(missing_ok=True)
-            self.profile_path = None
 
     async def refresh_tools(self) -> None:
         result = await self.request("tools/list", {})
@@ -160,9 +155,9 @@ class McpProcess:
 
 
 class McpManager:
-    def __init__(self, workspace: Path | None = None) -> None:
+    def __init__(self, workspace: Path | None = None, *, home: Path | None = None, backend: str | None = None) -> None:
         self.servers: dict[str, McpProcess] = {}
-        self.supervisor = SandboxSupervisor((workspace or Path.cwd()).resolve())
+        self.supervisor = SandboxSupervisor((workspace or Path.cwd()).resolve(), home=home, backend=backend)
 
     async def start(self, configs: list[dict[str, Any]]) -> None:
         for config in configs:

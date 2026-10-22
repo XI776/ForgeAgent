@@ -1,0 +1,47 @@
+name: forgeagent
+
+services:
+  forgeagent:
+    build: .
+    image: forgeagent:0.1.0
+    container_name: forgeagent
+    init: true
+    restart: unless-stopped
+    ports:
+      # Keep the control surface on the host loopback. Put an authenticated
+      # reverse proxy in front before exposing it to a network.
+      - "127.0.0.1:8765:8765"
+    env_file:
+      - path: backend/.env
+        required: false
+    environment:
+      FORGEAGENT_HOST: 0.0.0.0
+      FORGEAGENT_PORT: "8765"
+      FORGEAGENT_DATA_DIR: /data
+      FORGEAGENT_WORKSPACE_DIR: /workspace
+      FORGEAGENT_USER_SKILLS_DIR: /data/user-skills
+      FORGEAGENT_WEB_DIR: /app/web
+      FORGEAGENT_SANDBOX_BACKEND: auto
+      # Docker's published port appears as the bridge gateway inside the
+      # container; loopback-only checks would otherwise reject artifacts.
+      FORGEAGENT_TRUSTED_CLIENTS: "127.0.0.0/8,::1/128,localhost,testclient,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16"
+    volumes:
+      - forgeagent-data:/data
+      - ./workspace:/workspace
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      # These options let the unprivileged bwrap binary create user, mount,
+      # pid, and network namespaces inside the container, so every Shell/MCP
+      # process gets workspace filesystem isolation and network=denied. The
+      # container still runs as uid 1000 with all capabilities dropped; bwrap
+      # is the per-command boundary. Removing them falls back to the container
+      # boundary, where network=denied MCP servers cannot start.
+      - seccomp=unconfined
+      - apparmor=unconfined
+      - systempaths=unconfined
+    stop_grace_period: 15s
+
+volumes:
+  forgeagent-data:

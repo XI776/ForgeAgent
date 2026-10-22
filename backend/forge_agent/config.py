@@ -46,7 +46,10 @@ class Settings:
     data_dir: Path = _path("FORGEAGENT_DATA_DIR", DATA_DIR)
     user_skills_dir: Path = _path("FORGEAGENT_USER_SKILLS_DIR", _user_skills_dir())
     workspace_dir: Path = _path("FORGEAGENT_WORKSPACE_DIR", ROOT / "workspace")
-    computer_enabled: bool = env("FORGEAGENT_COMPUTER_ENABLED", "false").lower() == "true"
+    web_dir: Path = _path("FORGEAGENT_WEB_DIR", ROOT.parent / "desktop" / "dist")
+    trusted_clients: str = env("FORGEAGENT_TRUSTED_CLIENTS", "127.0.0.0/8,::1/128,localhost,testclient")
+    allowed_origins: str = env("FORGEAGENT_ALLOWED_ORIGINS")
+    sandbox_backend: str = env("FORGEAGENT_SANDBOX_BACKEND", "auto").lower()
     max_steps: int = int(env("FORGEAGENT_MAX_STEPS", "12"))
     run_warning_tokens: int = int(env("FORGEAGENT_RUN_WARNING_TOKENS", "80000"))
     run_finalization_tokens: int = int(env("FORGEAGENT_RUN_FINALIZATION_TOKENS", "100000"))
@@ -58,6 +61,11 @@ class Settings:
     @property
     def database(self) -> Path:
         return self.data_dir / "forgeagent.db"
+
+    @property
+    def sandbox_home(self) -> Path:
+        raw = env("FORGEAGENT_SANDBOX_HOME").strip()
+        return Path(raw).expanduser().resolve() if raw else self.data_dir / "sandbox-home"
 
     def ensure_dirs(self) -> None:
         if self.data_dir == DATA_DIR.resolve() and not DATA_DIR.exists() and LEGACY_DATA_DIR.is_dir():
@@ -76,10 +84,10 @@ class Settings:
         for path in (
             self.data_dir,
             self.workspace_dir,
+            self.sandbox_home,
             self.data_dir / "artifacts",
             self.data_dir / "memory",
             self.data_dir / "skills",
-            self.data_dir / "screenshots",
             self.data_dir / "settings",
         ):
             path.mkdir(parents=True, exist_ok=True)

@@ -35,6 +35,11 @@ function PreferencesView() {
   })
   const test = useMutation({ mutationFn: () => rpc.call<any>('model_settings.test', input()) })
   const restart = useMutation({ mutationFn: () => rpc.call('system.restart', {}), onSuccess: () => { settings.refetch(); extensions.refetch() } })
+  const sandbox = info.data?.execution_capabilities?.workspace_sandbox
+  const sandboxLabel = sandbox === 'linux-bubblewrap' ? 'Linux bubblewrap'
+    : sandbox === 'container' ? 'Docker 容器边界（仅 workspace + 网络允许）'
+    : sandbox === 'unavailable' ? '不可用：Shell 与默认 MCP 将拒绝启动'
+    : (sandbox || '未知')
 
   return <section className="page">
     <header className="page-head"><div><h1>设置</h1><p>配置模型服务、运行环境和扩展能力。</p></div></header>
@@ -42,7 +47,7 @@ function PreferencesView() {
       <section className="settings-section"><div className="section-heading"><h2>Host</h2>{settings.data?.restart_required&&<Status value="restart_required"/>}</div><dl>
         <dt>版本</dt><dd>{info.data?.version}</dd><dt>数据库</dt><dd className="mono">{info.data?.database}</dd>
         <dt>工作区</dt><dd className="mono">{info.data?.workspace}</dd><dt>RPC 方法</dt><dd>{info.data?.rpc_methods?.length || 0}</dd>
-        <dt>工作区沙箱</dt><dd>{info.data?.execution_capabilities?.workspace_sandbox==='unavailable'?'不可用：Shell 与默认 MCP 将拒绝启动':info.data?.execution_capabilities?.workspace_sandbox||'未知'}</dd>
+        <dt>工作区沙箱</dt><dd>{sandboxLabel}</dd>
       </dl>{info.data?.legacy_permission_rules_needing_review>0&&<p className="field-note">有 {info.data.legacy_permission_rules_needing_review} 条旧授权规则已停用；再次执行相应操作时需要重新审批。</p>}{settings.data?.restart_required&&<div className="restart-panel"><p>扩展配置已改变，需要重启 Host 内部服务才能生效。</p><button disabled={!settings.data?.can_restart||restart.isPending} onClick={()=>restart.mutate()}><RotateCcw size={14}/>{restart.isPending?'重启中':'安全重启服务'}</button>{!settings.data?.can_restart&&<small>有运行中的任务，完成或中断后才能重启。</small>}</div>}{restart.error&&<p className="form-error">{String(restart.error)}</p>}</section>
       <section className="settings-section"><h2>模型</h2>
         <div className="provider-tabs">{settings.data?.providers.map((p: any) => <button className={provider === p.provider ? 'active' : ''} key={p.provider} onClick={() => setProvider(p.provider)}>{p.label}</button>)}</div>
@@ -51,7 +56,7 @@ function PreferencesView() {
           <label>Base URL<input value={draft.base_url || ''} onChange={e => setDraft({ ...draft, base_url: e.target.value })}/></label>
           <label>API 风格<select value={draft.api_style || 'chat_completions'} onChange={e => setDraft({ ...draft, api_style: e.target.value })}><option value="chat_completions">Chat Completions</option><option value="responses">Responses</option><option value="anthropic_messages">Anthropic Messages</option></select></label>
           <label>API Key<input type="password" value={draft.api_key || ''} placeholder={current.configured ? '已配置（留空保持）' : '请输入 API Key'} onChange={e => setDraft({ ...draft, api_key: e.target.value })}/></label>
-          <p className="field-note">密钥来源：{current.key_source==='dpapi'?'Windows DPAPI':current.key_source==='keychain'?'macOS Keychain':current.key_source==='environment'?'环境变量':'未配置'}</p>
+          <p className="field-note">密钥来源：{current.key_source==='file'?'本地文件（0600）':current.key_source==='environment'?'环境变量':'未配置'}</p>
           <div className="inline-actions"><button onClick={() => test.mutate()}>{test.isPending ? <RefreshCw size={14}/> : null}测试连接</button><button className="primary" onClick={() => save.mutate()}>保存并设为默认</button></div>
           {test.data && <><Status value={test.data.success ? 'available' : 'failed'}/>{test.data.error&&<p className="form-error">{test.data.error}</p>}</>} {save.error && <p className="form-error">{String(save.error)}</p>}
         </div>}

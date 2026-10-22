@@ -12,5 +12,8 @@ __pycache__/
 desktop/node_modules/
 desktop/dist/
 desktop/dist-electron/
-native/macos-computer-helper/.build/
 *.log
+
+.venv/
+workspace/*
+!workspace/.gitkeep
